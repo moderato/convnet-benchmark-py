@@ -30,11 +30,11 @@ class InvertedResidual(nn.Module):
             # pw
             nn.Conv2d(inp, inp * expand_ratio, 1, 1, 0, bias=False),
             nn.BatchNorm2d(inp * expand_ratio),
-            nn.ReLU6(inplace=True),
+            nn.ReLU(inplace=True),
             # dw
             nn.Conv2d(inp * expand_ratio, inp * expand_ratio, 3, stride, 1, groups=inp * expand_ratio, bias=False),
             nn.BatchNorm2d(inp * expand_ratio),
-            nn.ReLU6(inplace=True),
+            nn.ReLU(inplace=True),
             # pw-linear
             nn.Conv2d(inp * expand_ratio, oup, 1, 1, 0, bias=False),
             nn.BatchNorm2d(oup),
@@ -96,7 +96,7 @@ class MobileNetV2(nn.Module):
 
     def forward(self, x):
         x = self.features(x)
-        x = x.view(-1, self.last_channel)
+        x = x.reshape(-1, self.last_channel)
         x = self.classifier(x)
         return x
 

@@ -12,6 +12,10 @@ from collections import OrderedDict
 import torch.autograd.profiler as profiler
 
 models.__dict__['resnext101'] = models.resnext101_32x8d
+models.__dict__['mnasnet_a1'] = models.mnasnet.mnasnet1_0
+
+from mobilenet_v1 import mobilenet_v1
+models.__dict__['mobilenet_v1'] = mobilenet_v1
 
 from mobilenet import MobileNetV2
 models.__dict__['mobilenet_v2'] = MobileNetV2
@@ -29,19 +33,22 @@ models.__dict__['unet3d'] = UNet3D
 archs = OrderedDict()
 
 ### [batch_size, channels, width, height, support_channels_last, support_mkldnn_blocked]
-archs['alexnet'] = [128, 3, 224, 224, True, True]
-archs['vgg11'] = [64, 3, 224, 224, True, True]
-archs['inception_v3'] = [32, 3, 299, 299, True, False]
+# archs['alexnet'] = [128, 3, 224, 224, True, True]
+# archs['vgg11'] = [64, 3, 224, 224, True, True]
+# archs['inception_v3'] = [32, 3, 299, 299, True, False]
+archs['resnet18'] = [128, 3, 224, 224, True, True]
 archs['resnet50'] = [128, 3, 224, 224, True, True]
-archs['resnext101'] = [128, 3, 224, 224, True, True]
-archs['wide_resnet50_2'] = [128, 3, 224, 224, True, True]
+# archs['resnext101'] = [128, 3, 224, 224, True, True]
+# archs['wide_resnet50_2'] = [128, 3, 224, 224, True, True]
+archs['mnasnet_a1'] = [128, 3, 224, 224, True, False]
 archs['mnasnet0_5'] = [128, 3, 224, 224, True, False]
-archs['squeezenet1_0'] = [128, 3, 224, 224, True, False]
-archs['densenet121'] = [32, 3, 224, 224, True, False]
+# archs['squeezenet1_0'] = [128, 3, 224, 224, True, False]
+# archs['densenet121'] = [32, 3, 224, 224, True, False]
+archs['mobilenet_v1'] = [128, 3, 224, 224, True, False]
 archs['mobilenet_v2'] = [128, 3, 224, 224, True, False]
-archs['shufflenet'] = [128, 3, 224, 224, True, False]
-archs['unet'] = [32, 3, 128, 128, True, False]
-#archs['unet3d'] = [6, 4, 64, 64, 64]
+# archs['shufflenet'] = [128, 3, 224, 224, True, False]
+# archs['unet'] = [32, 3, 128, 128, True, False]
+# archs['unet3d'] = [6, 4, 64, 64, 64]
 
 archs_list = list(archs.keys())
 steps = 50 # nb of steps in loop to average perf
@@ -67,7 +74,7 @@ def benchmark():
                        help='enable autograd profiler')
 
     args = parser.parse_args()
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
+    args.cuda = (not args.no_cuda) and torch.cuda.is_available()
 
     arch_dict = {args.arch: archs[args.arch]} if args.arch in archs_list else archs
 
@@ -79,6 +86,7 @@ def benchmark():
         kernel = 'cudnn'
         p = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv',
                                     shell=True)
+        print(p)
         device_name = str(p).split('\\n')[1]
     else:
         kernel = 'nn'
@@ -97,6 +105,13 @@ def benchmark():
         return time.time()
 
     for arch, config in arch_dict.items():
+        # cover at least resnext for now per FB request
+        # TODO:
+        # 1. view() support?
+        # 2. Dropout() support?
+        if args.mkldnn and not (arch == 'resnext101' or arch == 'mobilenet_v1' or arch == 'mobilenet_v2' or arch == 'mnasnet_a1' or arch == 'resnet50' or arch == 'resnet18'):
+            continue
+
         if arch == 'unet3d':
             batch_size, c, d, h, w = config[0], config[1], config[2], config[3], config[4]
             batch_size = 1 if args.single_batch_size else batch_size
@@ -105,7 +120,7 @@ def benchmark():
             data = torch.randn(batch_size, c, d, h, w)
         else:
             batch_size, c, h, w = config[0], config[1], config[2], config[3]
-            batch_size = 64 if arch is 'resnet50' and args.inference else batch_size
+            batch_size = 64 if arch == 'resnet50' and args.inference else batch_size
             batch_size = 1 if args.single_batch_size else batch_size
             print('ModelType: %s, Kernels: %s Input shape: %dx%dx%dx%d' %
                  (arch, kernel, batch_size, c, h, w))

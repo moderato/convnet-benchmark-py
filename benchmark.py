@@ -10,6 +10,17 @@ import time
 import subprocess
 from collections import OrderedDict
 import torch.autograd.profiler as profiler
+from torch.autograd.profiler import record_function
+
+import graph_observer
+from caffe2.python import core
+core.GlobalInit(
+    [
+        "python",
+        "--pytorch_enable_execution_graph_observer=true",
+        "--pytorch_execution_graph_observer_iter_label=## BENCHMARK ##",
+    ]
+)
 
 models.__dict__['resnext101'] = models.resnext101_32x8d
 models.__dict__['mnasnet_a1'] = models.mnasnet.mnasnet1_0
@@ -29,36 +40,14 @@ models.__dict__['unet'] = UNet
 from unet3d import UNet3D
 models.__dict__['unet3d'] = UNet3D
 
-
-archs = OrderedDict()
-
-### [batch_size, channels, width, height, support_channels_last, support_mkldnn_blocked]
-# archs['alexnet'] = [128, 3, 224, 224, True, True]
-# archs['vgg11'] = [64, 3, 224, 224, True, True]
-# archs['inception_v3'] = [32, 3, 299, 299, True, False]
-archs['resnet18'] = [128, 3, 224, 224, True, True]
-archs['resnet50'] = [128, 3, 224, 224, True, True]
-# archs['resnext101'] = [128, 3, 224, 224, True, True]
-# archs['wide_resnet50_2'] = [128, 3, 224, 224, True, True]
-archs['mnasnet_a1'] = [128, 3, 224, 224, True, False]
-archs['mnasnet0_5'] = [128, 3, 224, 224, True, False]
-# archs['squeezenet1_0'] = [128, 3, 224, 224, True, False]
-# archs['densenet121'] = [32, 3, 224, 224, True, False]
-archs['mobilenet_v1'] = [128, 3, 224, 224, True, False]
-archs['mobilenet_v2'] = [128, 3, 224, 224, True, False]
-# archs['shufflenet'] = [128, 3, 224, 224, True, False]
-# archs['unet'] = [32, 3, 128, 128, True, False]
-# archs['unet3d'] = [6, 4, 64, 64, 64]
-
-archs_list = list(archs.keys())
-steps = 50 # nb of steps in loop to average perf
 nDryRuns = 5 # nb of warmup steps
 
 def benchmark():
     # benchmark settings
     parser = argparse.ArgumentParser(description='PyTorch Convnet Benchmark')
     parser.add_argument('--arch',  action='store', default='all',
-                       choices=archs_list + ['all'],
+                       choices=['alexnet', 'vgg11', 'inception_v3', 'resnet18', 'resnet50', 'resnext101', 'wide_resnet50_2', 'mnasnet_a1', 'mnasnet0_5',\
+                            'squeezenet1_0', 'densenet121', 'mobilenet_v1', 'mobilenet_v2', 'shufflenet', 'unet', 'unet3d', 'all'],
                        help='model name can be specified. all is default.' )
     parser.add_argument('--no-cuda', action='store_true', default=False,
                        help='disable CUDA')
@@ -72,10 +61,35 @@ def benchmark():
                        help='single batch size')
     parser.add_argument('--profile', action='store_true', default=False,
                        help='enable autograd profiler')
+    parser.add_argument('--collect-execution-graph', action='store_true', default=False,
+                       help='collect execution graph')
+    parser.add_argument("--batch-size", type=int, default=64,
+                       help='batch size')
+    parser.add_argument("--num-steps", type=int, default=50,
+                       help='nb of steps in loop to average perf')
 
     args = parser.parse_args()
     args.cuda = (not args.no_cuda) and torch.cuda.is_available()
 
+    archs = OrderedDict()
+    ### [batch_size, channels, width, height, support_channels_last, support_mkldnn_blocked]
+    archs['alexnet'] = [args.batch_size, 3, 224, 224, True, True]
+    archs['vgg11'] = [args.batch_size, 3, 224, 224, True, True]
+    archs['inception_v3'] = [args.batch_size, 3, 299, 299, True, False]
+    archs['resnet18'] = [args.batch_size, 3, 224, 224, True, True]
+    archs['resnet50'] = [args.batch_size, 3, 224, 224, True, True]
+    archs['resnext101'] = [args.batch_size, 3, 224, 224, True, True]
+    archs['wide_resnet50_2'] = [args.batch_size, 3, 224, 224, True, True]
+    archs['mnasnet_a1'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['mnasnet0_5'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['squeezenet1_0'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['densenet121'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['mobilenet_v1'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['mobilenet_v2'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['shufflenet'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['unet'] = [args.batch_size, 3, 64, 64, True, False]
+    archs['unet3d'] = [6, 4, 64, 64, 64]
+    archs_list = list(archs.keys())
     arch_dict = {args.arch: archs[args.arch]} if args.arch in archs_list else archs
 
     if args.cuda:
@@ -167,8 +181,7 @@ def benchmark():
             net.train()
             net.aux_logits = False
 
-        for i in range(nDryRuns):
-            optimizer.zero_grad()   # zero the gradient buffers
+        for _ in range(nDryRuns):
             if args.inference:
                 with torch.no_grad():
                     output = net(data)
@@ -177,39 +190,51 @@ def benchmark():
                 loss = output.sum() / 1e6 if 'unet' in arch else criterion(output, target)
                 loss.backward()
                 optimizer.step()    # Does the update
+                optimizer.zero_grad()   # zero the gradient buffers
 
         time_fwd, time_bwd, time_upt = 0, 0, 0
 
-        with profiler.profile(record_shapes=True, enabled=args.profile) as prof:
-            for i in range(steps):
-                optimizer.zero_grad()   # zero the gradient buffers
-                t1 = _time()
-                if args.inference:
-                    with torch.no_grad():
-                        output = net(data)
-                else:
-                    output = net(data)
-                t2 = _time()
-                if not args.inference:
-                    loss = output.sum() / 1e6 if 'unet' in arch else criterion(output, target)
-                    loss.backward()
-                    t3 = _time()
-                    optimizer.step()    # Does the update
-                    t4 = _time()
-                time_fwd = time_fwd + (t2 - t1)
-                if not args.inference:
-                    time_bwd = time_bwd + (t3 - t2)
-                    time_upt = time_upt + (t4 - t3)
+        with profiler.profile(args.profile, use_cuda=args.cuda, use_kineto=True) as prof:
+            class dummy_record_function():
+                def __enter__(self):
+                    return None
+                def __exit__(self, exc_type, exc_value, traceback):
+                    return False
 
-            time_fwd_avg = time_fwd / steps * 1000
-            time_bwd_avg = time_bwd / steps * 1000
-            time_upt_avg = time_upt / steps * 1000
+            for _ in range(args.num_steps):
+                with record_function("## BENCHMARK ##") if args.collect_execution_graph else dummy_record_function():
+                    with record_function("## Forward ##"):
+                        t1 = _time()
+                        if args.inference:
+                            with torch.no_grad():
+                                output = net(data)
+                        else:
+                            output = net(data)
+                        t2 = _time()
+                    if not args.inference:
+                        with record_function("## Backward ##"):
+                            loss = output.sum() / 1e6 if 'unet' in arch else criterion(output, target)
+                            loss.backward()
+                            t3 = _time()
+                            optimizer.step()    # Does the update
+                            t4 = _time()
+                            optimizer.zero_grad()   # zero the gradient buffers
+                    time_fwd = time_fwd + (t2 - t1)
+                    if not args.inference:
+                        time_bwd = time_bwd + (t3 - t2)
+                        time_upt = time_upt + (t4 - t3)
+
+            time_fwd_avg = time_fwd / args.num_steps * 1000
+            time_bwd_avg = time_bwd / args.num_steps * 1000
+            time_upt_avg = time_upt / args.num_steps * 1000
 
             # update not included!
             time_total = time_fwd_avg + time_bwd_avg
 
         if args.profile:
-            print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=100))
+            with open("convnet_benchmark.prof", "w") as prof_f:
+                prof_f.write(prof.key_averages().table(sort_by="self_cpu_time_total"))
+            prof.export_chrome_trace("convnet_benchmark.json")
 
         print("%-30s %10s %10.2f (ms) %10.2f (imgs/s)" % (kernel, ':forward:',
               time_fwd_avg, batch_size*1000/time_fwd_avg ))

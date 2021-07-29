@@ -67,6 +67,8 @@ def benchmark():
                        help='batch size')
     parser.add_argument("--num-steps", type=int, default=50,
                        help='nb of steps in loop to average perf')
+    parser.add_argument("--print-freq", type=int, default=5,
+                       help='print frequency')
 
     args = parser.parse_args()
     args.cuda = (not args.no_cuda) and torch.cuda.is_available()
@@ -194,6 +196,11 @@ def benchmark():
 
         time_fwd, time_bwd, time_upt = 0, 0, 0
 
+        if args.cuda:
+            event_1 = torch.cuda.Event(enable_timing=True)
+            event_2 = torch.cuda.Event(enable_timing=True)
+            event_3 = torch.cuda.Event(enable_timing=True)
+
         with profiler.profile(args.profile, use_cuda=args.cuda, use_kineto=True) as prof:
             class dummy_record_function():
                 def __enter__(self):
@@ -201,35 +208,49 @@ def benchmark():
                 def __exit__(self, exc_type, exc_value, traceback):
                     return False
 
-            for _ in range(args.num_steps):
+            for idx in range(args.num_steps):
+                should_print = ((idx + 1) % args.print_freq) == 0
                 with record_function("## BENCHMARK ##") if args.collect_execution_graph else dummy_record_function():
                     with record_function("## Forward ##"):
                         t1 = _time()
+                        if args.cuda:
+                            event_1.record()
                         if args.inference:
                             with torch.no_grad():
                                 output = net(data)
                         else:
                             output = net(data)
+                        if args.cuda:
+                            event_2.record()
                         t2 = _time()
+                    time_fwd += event_1.elapsed_time(event_2) * 1.e-3 if args.cuda else (t2 - t1)
                     if not args.inference:
                         with record_function("## Backward ##"):
+                            if args.cuda:
+                                event_1.record()
                             loss = output.sum() / 1e6 if 'unet' in arch else criterion(output, target)
                             loss.backward()
+                            if args.cuda:
+                                event_2.record()
                             t3 = _time()
                             optimizer.step()    # Does the update
+                            if args.cuda:
+                                event_3.record()
                             t4 = _time()
                             optimizer.zero_grad()   # zero the gradient buffers
-                    time_fwd = time_fwd + (t2 - t1)
                     if not args.inference:
-                        time_bwd = time_bwd + (t3 - t2)
-                        time_upt = time_upt + (t4 - t3)
+                        time_bwd += event_1.elapsed_time(event_2) * 1.e-3 if args.cuda else (t3 - t2)
+                        time_upt += event_2.elapsed_time(event_3) * 1.e-3 if args.cuda else (t4 - t3)
+                    if should_print:
+                        time_per_it = (time_fwd + time_bwd + time_upt) / (idx + 1) * 1000
+                        print("Finished step {}/{}, {:.2f} ms/it".format(idx + 1, args.num_steps, time_per_it))
 
             time_fwd_avg = time_fwd / args.num_steps * 1000
             time_bwd_avg = time_bwd / args.num_steps * 1000
             time_upt_avg = time_upt / args.num_steps * 1000
+            time_total = time_fwd_avg + time_bwd_avg + time_upt_avg
 
-            # update not included!
-            time_total = time_fwd_avg + time_bwd_avg
+            print("Overall per-batch training time: {:.2f} ms".format(time_total))
 
         if args.profile:
             with open("convnet_benchmark.prof", "w") as prof_f:

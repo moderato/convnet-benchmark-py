@@ -1,16 +1,12 @@
-import argparse
-import torch
-from torch.autograd import Variable
+import torch, torchvision
 import torch.nn as nn
-import torchvision
 import torchvision.models as models
 import torch.optim as optim
-from torch.utils import mkldnn as mkldnn_utils
-import time
-import subprocess
-from collections import OrderedDict
 import torch.autograd.profiler as profiler
+from torch.utils import mkldnn as mkldnn_utils
 from torch.autograd.profiler import record_function
+from collections import OrderedDict
+import time, subprocess, os, argparse
 
 import graph_observer
 from caffe2.python import core
@@ -47,7 +43,7 @@ def benchmark():
     parser = argparse.ArgumentParser(description='PyTorch Convnet Benchmark')
     parser.add_argument('--arch',  action='store', default='all',
                        choices=['alexnet', 'vgg11', 'inception_v3', 'resnet18', 'resnet50', 'resnext101', 'wide_resnet50_2', 'mnasnet_a1', 'mnasnet0_5',\
-                            'squeezenet1_0', 'densenet121', 'mobilenet_v1', 'mobilenet_v2', 'shufflenet', 'unet', 'unet3d', 'all'],
+                            'squeezenet1_0', 'densenet121', 'mobilenet_v1', 'mobilenet_v2', 'mobilenet_v3_large', 'shufflenet', 'efficientnet_b7', 'unet', 'unet3d', 'all'],
                        help='model name can be specified. all is default.' )
     parser.add_argument('--no-cuda', action='store_true', default=False,
                        help='disable CUDA')
@@ -88,7 +84,9 @@ def benchmark():
     archs['densenet121'] = [args.batch_size, 3, 224, 224, True, False]
     archs['mobilenet_v1'] = [args.batch_size, 3, 224, 224, True, False]
     archs['mobilenet_v2'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['mobilenet_v3_large'] = [args.batch_size, 3, 224, 224, True, False]
     archs['shufflenet'] = [args.batch_size, 3, 224, 224, True, False]
+    archs['efficientnet_b7'] = [args.batch_size, 3, 224, 224, True, False]
     archs['unet'] = [args.batch_size, 3, 64, 64, True, False]
     archs['unet3d'] = [6, 4, 64, 64, 64]
     archs_list = list(archs.keys())
@@ -102,8 +100,9 @@ def benchmark():
         kernel = 'cudnn'
         p = subprocess.check_output('nvidia-smi --query-gpu=name --format=csv',
                                     shell=True)
-        print(p)
-        device_name = str(p).split('\\n')[1]
+        visible_devices = [int(s) for s in os.environ["CUDA_VISIBLE_DEVICES"].split(',')]
+        device_idx = min(visible_devices) if visible_devices is not None else 0
+        device_name = str(p).split('\\n')[device_idx + 1]
     else:
         kernel = 'nn'
         p = subprocess.check_output('cat /proc/cpuinfo | grep name | head -n 1',
@@ -200,6 +199,7 @@ def benchmark():
             event_1 = torch.cuda.Event(enable_timing=True)
             event_2 = torch.cuda.Event(enable_timing=True)
             event_3 = torch.cuda.Event(enable_timing=True)
+            event_4 = torch.cuda.Event(enable_timing=True)
 
         with profiler.profile(args.profile, use_cuda=args.cuda, use_kineto=True) as prof:
             class dummy_record_function():
@@ -226,21 +226,23 @@ def benchmark():
                     time_fwd += event_1.elapsed_time(event_2) * 1.e-3 if args.cuda else (t2 - t1)
                     if not args.inference:
                         with record_function("## Backward ##"):
+                            t3 = _time()
                             if args.cuda:
                                 event_1.record()
                             loss = output.sum() / 1e6 if 'unet' in arch else criterion(output, target)
                             loss.backward()
                             if args.cuda:
                                 event_2.record()
-                            t3 = _time()
-                            optimizer.step()    # Does the update
+                            t4 = _time()
                             if args.cuda:
                                 event_3.record()
-                            t4 = _time()
+                            optimizer.step()    # Does the update
+                            if args.cuda:
+                                event_4.record()
+                            t5 = _time()
                             optimizer.zero_grad()   # zero the gradient buffers
-                    if not args.inference:
-                        time_bwd += event_1.elapsed_time(event_2) * 1.e-3 if args.cuda else (t3 - t2)
-                        time_upt += event_2.elapsed_time(event_3) * 1.e-3 if args.cuda else (t4 - t3)
+                        time_bwd += event_1.elapsed_time(event_2) * 1.e-3 if args.cuda else (t4 - t3)
+                        time_upt += event_2.elapsed_time(event_3) * 1.e-3 if args.cuda else (t5 - t4)
                     if should_print:
                         time_per_it = (time_fwd + time_bwd + time_upt) / (idx + 1) * 1000
                         print("Finished step {}/{}, {:.2f} ms/it".format(idx + 1, args.num_steps, time_per_it))

@@ -226,23 +226,23 @@ def benchmark():
                     time_fwd += event_1.elapsed_time(event_2) * 1.e-3 if args.cuda else (t2 - t1)
                     if not args.inference:
                         with record_function("## Backward ##"):
-                            t3 = _time()
+                            t1 = _time()
                             if args.cuda:
                                 event_1.record()
+                            optimizer.zero_grad()   # zero the gradient buffers
                             loss = output.sum() / 1e6 if 'unet' in arch else criterion(output, target)
                             loss.backward()
                             if args.cuda:
                                 event_2.record()
-                            t4 = _time()
+                            t2 = _time()
                             if args.cuda:
                                 event_3.record()
-                            optimizer.step()    # Does the update
+                            optimizer.step()        # updates
                             if args.cuda:
                                 event_4.record()
-                            t5 = _time()
-                            optimizer.zero_grad()   # zero the gradient buffers
-                        time_bwd += event_1.elapsed_time(event_2) * 1.e-3 if args.cuda else (t4 - t3)
-                        time_upt += event_2.elapsed_time(event_3) * 1.e-3 if args.cuda else (t5 - t4)
+                            t3 = _time()
+                        time_bwd += event_1.elapsed_time(event_2) * 1.e-3 if args.cuda else (t2 - t1)
+                        time_upt += event_3.elapsed_time(event_4) * 1.e-3 if args.cuda else (t3 - t2)
                     if should_print:
                         time_per_it = (time_fwd + time_bwd + time_upt) / (idx + 1) * 1000
                         print("Finished step {}/{}, {:.2f} ms/it".format(idx + 1, args.num_steps, time_per_it))

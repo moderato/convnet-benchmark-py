@@ -8,16 +8,6 @@ from torch.autograd.profiler import record_function
 from collections import OrderedDict
 import time, subprocess, os, argparse
 
-# import graph_observer
-# from caffe2.python import core
-# core.GlobalInit(
-#     [
-#         "python",
-#         "--pytorch_enable_execution_graph_observer=true",
-#         "--pytorch_execution_graph_observer_iter_label=## BENCHMARK ##",
-#     ]
-# )
-
 models.__dict__['resnext101'] = models.resnext101_32x8d
 models.__dict__['mnasnet_a1'] = models.mnasnet.mnasnet1_0
 
